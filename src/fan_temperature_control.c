@@ -214,13 +214,29 @@ static Error FanTemperatureControl_SetByModelConfig0(
   if (! fc->Sensors.size)
     return err_success();
 
+  // Save defaults in case override fails (e.g. GPU sensors not available)
+  int saved_sources_size = ftc->TemperatureSourcesSize;
+  FS_TemperatureSource* saved_sources[FAN_TEMPERATURE_CONTROL_MAX_SOURCES];
+  memcpy(saved_sources, ftc->TemperatureSources, sizeof(saved_sources));
+
   // Override sensors
   ftc->TemperatureSourcesSize = 0;
 
   for_each_array(const char**, sensor, fc->Sensors) {
     e = FanTemperatureControl_AddTemperatureSources(ftc, *sensor);
-    if (e)
-      return e;
+    if (e) {
+      Log_Warn("Sensor '%s' is not available, falling back to defaults", *sensor);
+      // Restore defaults on failure instead of crashing the service
+      memcpy(ftc->TemperatureSources, saved_sources, sizeof(ftc->TemperatureSources));
+      ftc->TemperatureSourcesSize = saved_sources_size;
+      return err_success();
+    }
+  }
+
+  if (! ftc->TemperatureSourcesSize) {
+    Log_Warn("No sensors configured, falling back to defaults");
+    memcpy(ftc->TemperatureSources, saved_sources, sizeof(ftc->TemperatureSources));
+    ftc->TemperatureSourcesSize = saved_sources_size;
   }
 
   return err_success();

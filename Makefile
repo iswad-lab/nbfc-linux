@@ -1,19 +1,16 @@
 version     = 0.5.3
 
-PREFIX      = /usr
-
-bindir			= $(PREFIX)/bin
-confdir 		= /etc
-datadir			= $(PREFIX)/share
-sysddir 		= $(PREFIX)/lib/systemd/system
-mandir 			= $(PREFIX)/share/man
-man1dir     = $(mandir)/man1
-man5dir     = $(mandir)/man5
-runstatedir	= /var/run
-orcdir   		= $(confdir)/init.d
-systemvdir  = $(confdir)/init.d
-
-INIT_SYSTEM = systemd # systemd, systemv, openrc
+prefix      = /usr/local
+bindir      = ${exec_prefix}/bin
+sysconfdir  = ${prefix}/etc
+datadir     = ${prefix}/share
+mandir      = ${prefix}/share/man
+man1dir     = ${prefix}/share/man/man1
+man5dir     = ${prefix}/share/man/man5
+runstatedir = ${localstatedir}/run
+sysddir     = /usr/local/lib/systemd/system
+orcdir      = ${prefix}/etc/init.d
+systemvdir  = ${prefix}/etc/init.d
 
 LUA_CFLAGS = $(shell pkg-config --cflags lua5.4 || pkg-config --cflags lua)
 LUA_LDLIBS = $(shell pkg-config --libs lua5.4 || pkg-config --libs lua)
@@ -34,9 +31,9 @@ LDLIBS_EC_PROBE =
 LDLIBS_TEST_MODEL_CONFIG = -lm $(LUA_LDLIBS) -ldl
 
 override CPPFLAGS += \
-	-DSYSCONFDIR=\"$(confdir)\"      \
-	-DDATADIR=\"$(datadir)\"         \
-	-DRUNSTATEDIR=\"$(runstatedir)\" \
+	-DSYSCONFDIR=\"$(sysconfdir)\"    \
+	-DDATADIR=\"$(datadir)\"          \
+	-DRUNSTATEDIR=\"$(runstatedir)\"  \
 	-DVERSION=\"$(version)\"
 
 CORE  = src/nbfc_service src/nbfc src/ec_probe src/test_model_config
@@ -48,7 +45,7 @@ BASH_COMPLETION = completion/bash/ec_probe completion/bash/nbfc completion/bash/
 FISH_COMPLETION = completion/fish/ec_probe.fish completion/fish/nbfc.fish completion/fish/nbfc_service.fish
 ZSH_COMPLETION = completion/zsh/_ec_probe completion/zsh/_nbfc completion/zsh/_nbfc_service
 
-all: deprecation_warning $(CORE) $(DOC) $(SYSTEMD) $(OPEN_RC) $(SYSTEMV) $(BASH_COMPLETION) $(FISH_COMPLETION) $(ZSH_COMPLETION)
+all: $(CORE) $(DOC) $(SYSTEMD) $(OPEN_RC) $(SYSTEMV) $(BASH_COMPLETION) $(FISH_COMPLETION) $(ZSH_COMPLETION)
 
 install-core: $(CORE)
 	install -Dm 755 src/nbfc_service    $(DESTDIR)$(bindir)/nbfc_service
@@ -58,7 +55,7 @@ install-core: $(CORE)
 REPLACE_VARS = sed \
 	-e 's|@BINDIR@|$(bindir)|g'           \
 	-e 's|@DATADIR@|$(datadir)|g'         \
-	-e 's|@SYSCONFDIR@|$(confdir)|g'      \
+	-e 's|@SYSCONFDIR@|$(sysconfdir)|g'   \
 	-e 's|@RUNSTATEDIR@|$(runstatedir)|g' \
 	-e 's|@VERSION@|$(version)|g'
 
@@ -119,7 +116,7 @@ etc/init.d/nbfc_service.systemv: etc/init.d/nbfc_service.systemv.in
 
 install-configs:
 	# /usr/local/etc/nbfc
-	mkdir -p $(DESTDIR)$(confdir)/nbfc
+	mkdir -p $(DESTDIR)$(sysconfdir)/nbfc
 	
 	# /usr/local/share/nbfc/configs
 	mkdir -p $(DESTDIR)$(datadir)/nbfc/configs
@@ -158,7 +155,7 @@ install-completion: $(BASH_COMPLETION) $(FISH_COMPLETION) $(ZSH_COMPLETION)
 	install -Dm 644 completion/fish/nbfc_service.fish  $(DESTDIR)$(datadir)/fish/vendor_completions.d/nbfc_service.fish
 	install -Dm 644 completion/fish/ec_probe.fish      $(DESTDIR)$(datadir)/fish/vendor_completions.d/ec_probe.fish
 
-install: install-core install-configs install-$(INIT_SYSTEM) install-docs install-completion
+install: install-core install-configs install-systemd install-docs install-completion
 
 uninstall:
 	# Binaries
@@ -180,7 +177,7 @@ uninstall:
 	rm -rf $(DESTDIR)$(datadir)/nbfc
 	
 	# /usr/local/etc/nbfc
-	rm -rf $(DESTDIR)$(confdir)/nbfc
+	rm -rf $(DESTDIR)$(sysconfdir)/nbfc
 	
 	# Documentation
 	rm -f $(DESTDIR)$(man1dir)/ec_probe.1
@@ -207,6 +204,9 @@ clean:
 	rm -f $(BASH_COMPLETION) $(FISH_COMPLETION) $(ZSH_COMPLETION)
 	rm -f $(SYSTEMD) $(OPEN_RC) $(SYSTEMV)
 	rm -f $(DOC)
+
+clean-all:
+	rm -f config.guess config.log config.status config.sub configure configure~
 
 # =============================================================================
 # Binaries ====================================================================
@@ -310,7 +310,7 @@ src/nbfc: \
 	src/model_config_to_json.c src/model_config_to_json.h \
 	src/model_config_utils.c src/model_config_utils.h \
 	src/protocol.c src/protocol.h \
-	src/nxjson.c src/nxjson_write.c src/nxjson.h \
+	src/nxjson.c src/nxjson.h \
 	src/nbfc.h \
 	src/process.h src/process.c \
 	src/regex_utils.h src/regex_utils.c \
@@ -348,13 +348,6 @@ doc: doc/ec_probe.1 doc/nbfc.1 doc/nbfc_service.1 doc/nbfc_service.json.5
 	pandoc -f man -t html doc/nbfc.1 							> doc/nbfc.1.html
 	pandoc -f man -t html doc/nbfc_service.1 			> doc/nbfc_service.1.html
 	pandoc -f man -t html doc/nbfc_service.json.5 > doc/nbfc_service.json.5.html
-
-deprecation_warning:
-	@echo
-	@echo =======================================================================
-	@echo This Makefile is deprecated. Use ./configure for future builds!
-	@echo =======================================================================
-	@echo
 
 .force:
 	# force building targets

@@ -7,10 +7,13 @@
 #include "sleep.h"
 #include "nvidia.h"
 
+#include <dirent.h>  // DIR, opendir, readdir, closedir
 #include <errno.h>   // ENODATA, EINVAL
 #include <stdio.h>   // snprintf
 #include <stdlib.h>  // strtod
+#include <string.h>  // strstr
 #include <linux/limits.h> // PATH_MAX
+#include <sys/stat.h> // stat
 
 static const char* const LinuxHwmonDirs[] = {
   "/sys/class/hwmon/hwmon%d",
@@ -156,16 +159,123 @@ Error FS_Sensors_Init(void) {
     sleep_ms(1000);
   }
 
-  // Wait for nvidia module
-  for (; slept < sleep_time; ++slept) {
+  // ==========================================================================
+  // Detect VFIO passthrough — skip nvidia-ml if NVIDIA GPU is bound to
+  // vfio-pci (or pci-stub). Checking /proc/cmdline alone is not enough
+  // because users may configure passthrough via:
+  //   - /etc/modprobe.d/vfio.conf (options vfio-pci ids=...)
+  //   - driverctl set-override <pci> vfio-pci
+  //   - pci-stub driver
+  //   - initramfs hooks
+  //
+  // The most reliable indicator is to check the actual PCI device binding
+  // in /sys/bus/pci/devices/. We do BOTH checks for maximum coverage.
+  // ==========================================================================
+  bool vfio_active = false;
+
+  // Check 1: /proc/cmdline for vfio-pci.ids (fast path)
+  {
+    FILE* cmdline = fopen("/proc/cmdline", "r");
+    if (cmdline) {
+      char line[4096];
+      if (fgets(line, sizeof(line), cmdline)) {
+        if (strstr(line, "vfio-pci.ids") || strstr(line, "vfio_pci.ids"))
+          vfio_active = true;
+      }
+      fclose(cmdline);
+    }
+  }
+
+  // Check 2: scan /sys/bus/pci/devices/ for NVIDIA GPUs bound to vfio-pci
+  if (!vfio_active) {
+    const char* pci_devices_path = "/sys/bus/pci/devices";
+    DIR* dir = opendir(pci_devices_path);
+    if (dir) {
+      struct dirent* entry;
+      while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.')
+          continue;
+
+        // Read the vendor file for this PCI device
+        char vendor_path[PATH_MAX];
+        snprintf(vendor_path, sizeof(vendor_path),
+                 "%s/%s/vendor", pci_devices_path, entry->d_name);
+
+        char vendor[8];
+        file_op_result res = slurp_file(vendor, sizeof(vendor), vendor_path);
+        if (!res.ok)
+          continue;
+
+        // Strip newline
+        size_t vlen = strlen(vendor);
+        while (vlen > 0 && vendor[vlen-1] <= 32)
+          vendor[--vlen] = '\0';
+
+        // NVIDIA PCI vendor ID is 0x10de
+        if (strcmp(vendor, "0x10de") != 0 && strcmp(vendor, "10de") != 0)
+          continue;
+
+        // Check if this NVIDIA device is bound to vfio-pci or pci-stub
+        char driver_path[PATH_MAX];
+        snprintf(driver_path, sizeof(driver_path),
+                 "%s/%s/driver", pci_devices_path, entry->d_name);
+
+        struct stat driver_stat;
+        if (lstat(driver_path, &driver_stat) != 0)
+          continue; // no driver bound
+
+        if (!S_ISLNK(driver_stat.st_mode))
+          continue;
+
+        // Read the symlink target (the driver name)
+        char driver_target[PATH_MAX];
+        ssize_t linklen = readlink(driver_path, driver_target, sizeof(driver_target) - 1);
+        if (linklen <= 0)
+          continue;
+
+        driver_target[linklen] = '\0';
+
+        // Extract driver name (basename of the target path)
+        const char* driver_name = strrchr(driver_target, '/');
+        if (driver_name)
+          driver_name++;
+        else
+          driver_name = driver_target;
+
+        if (strcmp(driver_name, "vfio-pci") == 0 || strcmp(driver_name, "pci-stub") == 0) {
+          Log_Info("NVIDIA GPU at %s bound to '%s' — VFIO passthrough detected, skipping nvidia-ml sensor",
+                   entry->d_name, driver_name);
+          vfio_active = true;
+          break;
+        }
+      }
+      closedir(dir);
+    }
+    else {
+      Log_Debug("Could not open %s — cannot check PCI device bindings", pci_devices_path);
+    }
+  }
+
+  if (vfio_active) {
+    Log_Info("VFIO passthrough detected, skipping nvidia-ml sensor");
+  }
+  else {
+  // Try to init nvidia-ml sensor (non-blocking, try a few times)
+  // On passthrough boot, the NVIDIA GPU may not be accessible.
+  // The sensor will be resolved at runtime via the @GPU group fallback.
+  for (int nvidia_tries = 0; nvidia_tries < 3; ++nvidia_tries) {
     Nvidia_Error ne = Nvidia_Init();
     if (ne == Nvidia_Error_DlOpen)
       break;
 
     if (ne == Nvidia_Error_API) {
-      Log_Info("Waiting for nvidia sensor ...");
-      sleep_ms(1000);
-      continue;
+      if (nvidia_tries < 2) {
+        Log_Info("Waiting for nvidia sensor ...");
+        sleep_ms(1000);
+        continue;
+      }
+      Log_Warn("nvidia-ml: GPU not accessible, will use other GPU sensors if available");
+      break;
     }
 
     const array_size_t idx = FS_Sensors_Sources.size;
@@ -177,6 +287,7 @@ Error FS_Sensors_Init(void) {
     FS_Sensors_Sources.size = idx + 1;
     break;
   }
+  }  // end of else (not VFIO)
 
   if (! FS_Sensors_Sources.size)
     return err_string("No temperature sources found");
